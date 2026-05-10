@@ -1,6 +1,7 @@
 .app-shell {
   position: relative;
-  height: 100svh;
+  height: 100dvh;
+  min-height: 100svh;
   overflow: hidden;
   color: var(--ink);
   background: #07100c;
@@ -52,7 +53,7 @@
   flex-direction: column;
   gap: 18px;
   width: min(360px, calc(100vw - 36px));
-  max-height: calc(100svh - 36px);
+  max-height: calc(100dvh - max(18px, env(safe-area-inset-top)) - 18px);
   padding: 18px;
   overflow-y: auto;
   border-radius: 28px;
@@ -67,7 +68,7 @@
   flex-direction: column;
   gap: 18px;
   width: min(380px, calc(100vw - 36px));
-  max-height: calc(100svh - 36px);
+  max-height: calc(100dvh - max(18px, env(safe-area-inset-top)) - 18px);
   padding: 18px;
   overflow-y: auto;
   border-radius: 28px;
@@ -180,7 +181,7 @@ legend {
   background: transparent;
   border: 0;
   outline: 0;
-  font-size: 1rem;
+  font-size: 16px;
   font-weight: 500;
 }
 
@@ -248,6 +249,7 @@ fieldset {
   border: 1px solid var(--glass-line);
   border-radius: 16px;
   font: inherit;
+  font-size: 16px;
 }
 
 .simple-select option {
@@ -292,6 +294,7 @@ fieldset {
 
 input[type='range'] {
   width: 100%;
+  font-size: 16px;
   accent-color: var(--accent-bright);
 }
 
@@ -600,11 +603,12 @@ input[type='range'] {
     top: auto;
     left: max(10px, env(safe-area-inset-left));
     right: max(10px, env(safe-area-inset-right));
-    bottom: max(10px, env(safe-area-inset-bottom));
+    bottom: max(12px, calc(env(safe-area-inset-bottom) + 12px));
     width: auto;
-    max-height: 66svh;
-    padding: 14px;
+    max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px);
+    padding: 14px 14px max(18px, calc(env(safe-area-inset-bottom) + 14px));
     border-radius: 28px 28px 24px 24px;
+    overscroll-behavior: contain;
   }
 
   .control-panel::before,
@@ -641,11 +645,12 @@ input[type='range'] {
     top: auto;
     left: max(10px, env(safe-area-inset-left));
     right: max(10px, env(safe-area-inset-right));
-    bottom: max(10px, env(safe-area-inset-bottom));
+    bottom: max(12px, calc(env(safe-area-inset-bottom) + 12px));
     width: auto;
-    max-height: 76svh;
-    padding: 14px;
+    max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px);
+    padding: 14px 14px max(18px, calc(env(safe-area-inset-bottom) + 14px));
     border-radius: 28px 28px 24px 24px;
+    overscroll-behavior: contain;
   }
 
   .status-strip {
@@ -659,7 +664,7 @@ input[type='range'] {
   }
 
   .leaflet-bottom.leaflet-right {
-    bottom: calc(18px + env(safe-area-inset-bottom));
+    bottom: max(18px, calc(env(safe-area-inset-bottom) + 18px));
   }
 }
 
@@ -671,6 +676,14 @@ input[type='range'] {
   .search-field {
     height: 52px;
     border-radius: 17px;
+  }
+
+  .search-field input,
+  .simple-select,
+  .toggle,
+  .segmented button,
+  .primary-action {
+    font-size: 16px;
   }
 
   .segmented button {

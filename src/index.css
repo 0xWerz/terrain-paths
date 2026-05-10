@@ -24,8 +24,10 @@
   background: var(--paper);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
 }
 
 * {
@@ -37,6 +39,7 @@ body,
 #root {
   width: 100%;
   height: 100%;
+  min-height: 100dvh;
 }
 
 body {
@@ -48,6 +51,7 @@ button,
 input,
 select {
   font: inherit;
+  font-size: 16px;
 }
 
 button:focus-visible,
