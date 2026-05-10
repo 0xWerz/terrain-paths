@@ -5,22 +5,23 @@ import 'leaflet/dist/leaflet.css'
 import { Drawer } from 'vaul'
 import {
   Bike,
-  CheckCircle2,
+  ChevronLeft,
+  Copy,
+  ExternalLink,
   Gauge,
-  Layers3,
+  List,
   Loader2,
   MapPin,
   Mountain,
   Navigation,
+  Pencil,
   Route,
   Search,
   ShieldCheck,
-  SlidersHorizontal,
   Trees,
-  Waves,
   X,
 } from 'lucide-react'
-import './App.css'
+import { cn } from './lib/utils'
 
 type ActivityMode = 'bike' | 'run'
 type Difficulty = 'easy' | 'moderate' | 'hard'
@@ -114,6 +115,8 @@ type SearchState =
   | { status: 'loading'; message: string }
   | { status: 'success'; city: CityResult; routes: TerrainRoute[] }
   | { status: 'error'; message: string }
+
+type DrawerMode = 'search' | 'results' | 'details' | null
 
 const DEFAULT_CITY = ''
 const OVERPASS_ENDPOINTS = [
@@ -686,24 +689,38 @@ function scoreRoute(
 
 function ScoreBar({ label, value }: { label: string; value: number }) {
   return (
-    <div className="score-row">
+    <div className="grid grid-cols-[96px_1fr_28px] items-center gap-3 text-xs font-semibold text-muted">
       <span>{label}</span>
-      <div className="score-track">
-        <div style={{ width: `${value}%` }} />
+      <div className="h-1 overflow-hidden rounded-full bg-white/15">
+        <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${value}%` }} />
       </div>
-      <strong>{value}</strong>
+      <strong className="text-right text-ink">{value}</strong>
     </div>
   )
 }
 
 function Metric({ icon: Icon, label, value }: { icon: typeof Route; label: string; value: string }) {
   return (
-    <div className="metric">
-      <Icon size={17} aria-hidden="true" />
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <div className="min-w-0 rounded-2xl border border-line bg-white/[0.045] p-3">
+      <Icon className="text-accent" size={17} aria-hidden="true" />
+      <span className="mt-2 block text-[0.65rem] font-bold uppercase tracking-[0.08em] text-muted">{label}</span>
+      <strong className="mt-0.5 block break-words text-base font-semibold capitalize text-ink">{value}</strong>
     </div>
   )
+}
+
+function routeStart(route: TerrainRoute | undefined) {
+  return route?.geometry[0]
+}
+
+function formatCoords(point: LatLngTuple | undefined) {
+  if (!point) return ''
+  return `${point[0].toFixed(6)}, ${point[1].toFixed(6)}`
+}
+
+function googleMapsUrl(point: LatLngTuple | undefined) {
+  if (!point) return '#'
+  return `https://www.google.com/maps/search/?api=1&query=${point[0]},${point[1]}`
 }
 
 function App() {
@@ -721,12 +738,13 @@ function App() {
   const [difficulty, setDifficulty] = useState<Difficulty>('moderate')
   const [state, setState] = useState<SearchState>({ status: 'idle' })
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null)
-  const [controlOpen, setControlOpen] = useState(true)
-  const [resultsOpen, setResultsOpen] = useState(false)
+  const [drawerMode, setDrawerMode] = useState<DrawerMode>('search')
+  const [copiedCoords, setCopiedCoords] = useState(false)
   const mapElement = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const routeLayer = useRef<L.LayerGroup | null>(null)
   const fittedRouteSet = useRef('')
+  const drawerBodyRef = useRef<HTMLDivElement | null>(null)
   const isMobile = useMediaQuery('(max-width: 900px)')
 
   const routes = useMemo(() => (state.status === 'success' ? state.routes : []), [state])
@@ -735,6 +753,42 @@ function App() {
     [routes, selectedRouteId],
   )
   const activeStyle = styleConfig(activity, terrainStyle)
+  const selectedStart = routeStart(selectedRoute)
+
+  useEffect(() => {
+    drawerBodyRef.current?.scrollTo({ top: 0 })
+  }, [drawerMode])
+
+  const focusRouteOnMap = useCallback((route: TerrainRoute) => {
+    if (!mapRef.current || route.geometry.length < 2) return
+    const bounds = L.latLngBounds(route.geometry)
+    if (bounds.isValid()) {
+      mapRef.current.fitBounds(bounds, {
+        paddingTopLeft: [36, 96],
+        paddingBottomRight: [36, 170],
+        maxZoom: 15,
+      })
+    }
+  }, [])
+
+  const selectRoute = useCallback((route: TerrainRoute, revealMap = true) => {
+    setSelectedRouteId(route.id)
+    setCopiedCoords(false)
+    focusRouteOnMap(route)
+    if (revealMap && isMobile) setDrawerMode(null)
+  }, [focusRouteOnMap, isMobile])
+
+  const copySelectedCoords = useCallback(async () => {
+    const coords = formatCoords(selectedStart)
+    if (!coords) return
+    try {
+      await navigator.clipboard.writeText(coords)
+      setCopiedCoords(true)
+      window.setTimeout(() => setCopiedCoords(false), 1600)
+    } catch {
+      setCopiedCoords(false)
+    }
+  }, [selectedStart])
 
   useEffect(() => {
     if (!cityFocused || selectedCity || city.trim().length < 2) {
@@ -761,8 +815,7 @@ function App() {
   const runSearch = useCallback(async (event?: FormEvent) => {
     event?.preventDefault()
     if (!city.trim()) return
-    setControlOpen(false)
-    setResultsOpen(true)
+    setDrawerMode('results')
     setCityFocused(false)
     setCitySuggestionState({ status: 'idle', items: [] })
     setState({ status: 'loading', message: 'Reading map and terrain data...' })
@@ -783,13 +836,13 @@ function App() {
       )
       setState({ status: 'success', city: cityResult, routes: generatedRoutes })
       setSelectedRouteId(generatedRoutes[0]?.id ?? null)
-      setResultsOpen(true)
+      setDrawerMode('results')
     } catch (error) {
       setState({
         status: 'error',
         message: error instanceof Error ? error.message : 'Terrain analysis failed.',
       })
-      setResultsOpen(true)
+      setDrawerMode('results')
     }
   }, [activity, city, difficulty, distance, selectedCity, terrainStyle, useDistance])
 
@@ -855,7 +908,7 @@ function App() {
         opacity: selected ? 1 : 0.58,
         lineCap: 'round',
       }).addTo(routeLayer.current!)
-      line.on('click', () => setSelectedRouteId(route.id))
+      line.on('click', () => selectRoute(route, true))
       if (selected && route.geometry.length > 1) {
         const endpoints = [route.geometry[0], route.geometry[route.geometry.length - 1]]
         endpoints.forEach((point) => {
@@ -867,7 +920,7 @@ function App() {
             fillOpacity: 1,
           })
             .addTo(routeLayer.current!)
-            .on('click', () => setSelectedRouteId(route.id))
+            .on('click', () => selectRoute(route, true))
         })
       }
       route.geometry.forEach((point) => bounds.extend(point))
@@ -878,14 +931,7 @@ function App() {
       fittedRouteSet.current = routeSetKey
       mapRef.current.fitBounds(bounds, { padding: [30, 30], maxZoom: 13 })
     }
-  }, [routes, selectedRoute])
-
-  const resetToSearch = () => {
-    setState({ status: 'idle' })
-    setSelectedRouteId(null)
-    setResultsOpen(false)
-    setControlOpen(true)
-  }
+  }, [routes, selectedRoute, selectRoute])
 
   const citySuggestionsVisible =
     cityFocused &&
@@ -893,87 +939,93 @@ function App() {
     city.trim().length >= 2 &&
     (citySuggestionState.status === 'loading' || citySuggestionState.items.length > 0)
 
+  const labelClass = 'text-[0.68rem] font-bold uppercase tracking-[0.1em] text-muted'
+  const fieldClass =
+    'h-12 w-full rounded-2xl border border-line bg-field px-4 text-ink transition focus-within:border-accent/70 focus-within:bg-field-strong'
+  const iconButtonClass =
+    'inline-grid h-9 w-9 place-items-center rounded-full border border-line bg-white/[0.06] text-muted transition hover:bg-white/[0.1] hover:text-ink'
+  const primaryButtonClass =
+    'inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-accent px-4 font-bold text-[#07100c] shadow-[0_14px_30px_rgba(168,236,151,0.22)] transition disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none'
+
   const searchContent = (
-    <>
-        <div className="brand-line">
-          <Bike size={24} aria-hidden="true" />
-          <div>
-            <p>Route finder</p>
-            <h1>Terrain</h1>
-          </div>
-        </div>
+    <div className="flex min-h-0 flex-col gap-5">
+      <div className="flex items-center gap-3">
+        <Bike className="text-accent" size={24} aria-hidden="true" />
+        <h1 className="text-lg font-bold uppercase tracking-[0.18em] text-ink">Terrain</h1>
+      </div>
 
-        <form className="search-panel" onSubmit={runSearch}>
-          <div className="city-control">
-            <label htmlFor="city">Place</label>
-            <div className="search-field">
-              <Search size={18} aria-hidden="true" />
-              <input
-                autoComplete="off"
-                id="city"
-                value={city}
-                onBlur={() => window.setTimeout(() => setCityFocused(false), 120)}
-                onChange={(event) => {
-                  const nextCity = event.target.value
-                  setCity(nextCity)
-                  setSelectedCity(null)
-                  if (nextCity.trim().length < 2) {
-                    setCitySuggestionState({ status: 'idle', items: [] })
-                  }
-                }}
-                onFocus={() => setCityFocused(true)}
-                placeholder="Search a city"
-              />
-            </div>
-            {citySuggestionsVisible && (
-              <div className="city-suggestions" role="listbox">
-                {citySuggestionState.items.map((place) => (
-                  <button
-                    key={`${place.lat}-${place.lon}-${place.displayName}`}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      setSelectedCity(place)
-                      setCity(compactPlaceName(place))
-                      setCitySuggestionState({ status: 'idle', items: [] })
-                      setCityFocused(false)
-                    }}
-                    type="button"
-                  >
-                    <strong>{place.displayName.split(',')[0]}</strong>
-                    <span>{place.displayName.split(',').slice(1, 4).join(', ')}</span>
-                  </button>
-                ))}
-                {citySuggestionState.status === 'loading' && (
-                  <div className="city-suggestion-status">Searching places...</div>
-                )}
-              </div>
-            )}
+      <form className="grid gap-4" onSubmit={runSearch}>
+        <div className="relative grid gap-2">
+          <label className={labelClass} htmlFor="city">Place</label>
+          <div className={cn(fieldClass, 'grid grid-cols-[20px_1fr] items-center gap-3 px-4')}>
+            <Search className="text-muted" size={18} aria-hidden="true" />
+            <input
+              autoComplete="off"
+              className="min-w-0 border-0 bg-transparent text-ink outline-none placeholder:text-white/55"
+              id="city"
+              value={city}
+              onBlur={() => window.setTimeout(() => setCityFocused(false), 120)}
+              onChange={(event) => {
+                const nextCity = event.target.value
+                setCity(nextCity)
+                setSelectedCity(null)
+                if (nextCity.trim().length < 2) setCitySuggestionState({ status: 'idle', items: [] })
+              }}
+              onFocus={() => setCityFocused(true)}
+              placeholder="Search a city"
+            />
           </div>
-
-          <fieldset>
-            <legend>Move</legend>
-            <div className="segmented two-up">
-              {(['bike', 'run'] as ActivityMode[]).map((mode) => (
+          {citySuggestionsVisible && (
+            <div className="grid gap-1 rounded-2xl border border-line bg-black/25 p-1.5" role="listbox">
+              {citySuggestionState.items.map((place) => (
                 <button
-                  className={activity === mode ? 'active' : ''}
-                  key={mode}
+                  className="grid gap-0.5 rounded-xl px-3 py-2.5 text-left text-ink transition hover:bg-accent/10"
+                  key={`${place.lat}-${place.lon}-${place.displayName}`}
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={() => {
-                    const nextStyle = activityStyles[mode][0]
-                    setActivity(mode)
-                    setTerrainStyle(nextStyle.id)
-                    if (useDistance) setDistance(nextStyle.defaultDistance)
+                    setSelectedCity(place)
+                    setCity(compactPlaceName(place))
+                    setCitySuggestionState({ status: 'idle', items: [] })
+                    setCityFocused(false)
                   }}
                   type="button"
                 >
-                  {mode === 'bike' ? 'Bike' : 'Run'}
+                  <strong className="text-sm font-semibold">{place.displayName.split(',')[0]}</strong>
+                  <span className="text-xs font-medium text-muted">{place.displayName.split(',').slice(1, 4).join(', ')}</span>
                 </button>
               ))}
+              {citySuggestionState.status === 'loading' && (
+                <div className="px-3 py-2 text-xs font-medium text-muted">Searching...</div>
+              )}
             </div>
-          </fieldset>
+          )}
+        </div>
 
-          <label htmlFor="style">Type</label>
+        <fieldset className="grid gap-2">
+          <legend className={labelClass}>Move</legend>
+          <div className="grid h-11 grid-cols-2 overflow-hidden rounded-2xl border border-line bg-white/[0.035]">
+            {(['bike', 'run'] as ActivityMode[]).map((mode) => (
+              <button
+                className={cn('font-semibold text-muted transition', activity === mode && 'bg-accent text-[#07100c]')}
+                key={mode}
+                onClick={() => {
+                  const nextStyle = activityStyles[mode][0]
+                  setActivity(mode)
+                  setTerrainStyle(nextStyle.id)
+                  if (useDistance) setDistance(nextStyle.defaultDistance)
+                }}
+                type="button"
+              >
+                {mode === 'bike' ? 'Bike' : 'Run'}
+              </button>
+            ))}
+          </div>
+        </fieldset>
+
+        <div className="grid gap-2">
+          <label className={labelClass} htmlFor="style">Type</label>
           <select
-            className="simple-select"
+            className={fieldClass}
             id="style"
             value={terrainStyle}
             onChange={(event) => {
@@ -984,16 +1036,21 @@ function App() {
             }}
           >
             {activityStyles[activity].map((option) => (
-              <option key={option.id} value={option.id}>
+              <option className="text-slate-950" key={option.id} value={option.id}>
                 {option.label}
               </option>
             ))}
           </select>
+        </div>
 
-          <div className="optional-row">
-            <label htmlFor="use-distance">Distance</label>
+        <div className="grid gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <label className={labelClass} htmlFor="use-distance">Distance</label>
             <button
-              className={useDistance ? 'toggle active' : 'toggle'}
+              className={cn(
+                'h-9 min-w-16 rounded-full border border-line px-4 text-sm font-bold text-muted',
+                useDistance && 'border-transparent bg-accent text-[#07100c]',
+              )}
               id="use-distance"
               onClick={() => {
                 const next = !useDistance
@@ -1002,283 +1059,260 @@ function App() {
               }}
               type="button"
             >
-              {useDistance ? 'On' : 'Off'}
+              {useDistance ? km(distance) : 'Off'}
             </button>
           </div>
           {useDistance && (
-            <>
-              <div className="range-head">
-                <span>Prefer around</span>
-                <strong>{km(distance)}</strong>
-              </div>
-              <input
-                id="distance"
-                type="range"
-                min={activeStyle.range[0]}
-                max={activeStyle.range[1]}
-                value={distance}
-                onChange={(event) => setDistance(Number(event.target.value))}
-              />
-            </>
+            <input
+              className="w-full accent-accent"
+              id="distance"
+              type="range"
+              min={activeStyle.range[0]}
+              max={activeStyle.range[1]}
+              value={distance}
+              onChange={(event) => setDistance(Number(event.target.value))}
+            />
           )}
+        </div>
 
-          <fieldset>
-            <legend>Effort</legend>
-            <div className="segmented">
-              {(['easy', 'moderate', 'hard'] as Difficulty[]).map((level) => (
-                <button
-                  className={difficulty === level ? 'active' : ''}
-                  key={level}
-                  onClick={() => {
-                    setDifficulty(level)
-                    if (useDistance) setDistance(clamp(distance, activeStyle.range[0], activeStyle.range[1]))
-                  }}
-                  type="button"
-                >
-                  {level}
-                </button>
-              ))}
-            </div>
-          </fieldset>
-
-          <button className="primary-action" disabled={state.status === 'loading' || !city.trim()} type="submit">
-            {state.status === 'loading' ? (
-              <Loader2 className="spin" size={18} aria-hidden="true" />
-            ) : (
-              <Navigation size={18} aria-hidden="true" />
-            )}
-            Find paths
-          </button>
-        </form>
-
-        <section className="method-block">
-          <div>
-            <SlidersHorizontal size={18} aria-hidden="true" />
-            <h2>Ranking</h2>
+        <fieldset className="grid gap-2">
+          <legend className={labelClass}>Effort</legend>
+          <div className="grid h-11 grid-cols-3 overflow-hidden rounded-2xl border border-line bg-white/[0.035]">
+            {(['easy', 'moderate', 'hard'] as Difficulty[]).map((level) => (
+              <button
+                className={cn('font-semibold capitalize text-muted transition', difficulty === level && 'bg-accent text-[#07100c]')}
+                key={level}
+                onClick={() => setDifficulty(level)}
+                type="button"
+              >
+                {level}
+              </button>
+            ))}
           </div>
-          <p>Uses map data, road type, surface, and nature nearby. Distance is optional. No ratings or reviews.</p>
-        </section>
-    </>
+        </fieldset>
+
+        <button className={primaryButtonClass} disabled={state.status === 'loading' || !city.trim()} type="submit">
+          {state.status === 'loading' ? (
+            <Loader2 className="animate-spin" size={18} aria-hidden="true" />
+          ) : (
+            <Navigation size={18} aria-hidden="true" />
+          )}
+          Find paths
+        </button>
+      </form>
+    </div>
+  )
+
+  const emptyContent = (
+    <div className="flex items-center gap-3 rounded-2xl border border-line bg-white/[0.04] p-4 text-muted">
+      {state.status === 'loading' ? <Loader2 className="animate-spin text-accent" size={22} /> : <MapPin className="text-accent" size={22} />}
+      <p className="m-0 text-sm font-medium">
+        {state.status === 'loading'
+          ? state.message
+          : state.status === 'error'
+            ? 'Search failed. Try again in a moment.'
+            : 'No clear paths found. Try another type or nearby place.'}
+      </p>
+    </div>
+  )
+
+  const routeList = (
+    <div className="grid gap-2">
+      {routes.map((route, index) => (
+        <button
+          className={cn(
+            'grid w-full grid-cols-[4px_1fr_auto] items-center gap-3 rounded-2xl border border-line bg-white/[0.04] p-3 text-left text-ink transition hover:border-accent/45 hover:bg-accent/10',
+            selectedRoute?.id === route.id && 'border-accent/65 bg-accent/12',
+          )}
+          key={route.id}
+          onClick={() => selectRoute(route)}
+          type="button"
+        >
+          <span className="h-11 rounded-full" style={{ background: routeColors[index % routeColors.length] }} />
+          <span className="min-w-0">
+            <strong className="block truncate text-sm font-semibold">{route.name.replace(/^\d+\.\s/, '')}</strong>
+            <span className="mt-1 block text-xs font-medium capitalize text-muted">
+              {route.score_total} score / {km(route.distance_km)} / {route.difficulty}
+            </span>
+          </span>
+          <Navigation className="text-muted" size={17} aria-hidden="true" />
+        </button>
+      ))}
+    </div>
   )
 
   const resultsContent = (
-    <>
-        <header>
-          <div>
-            <p>Results</p>
-            <h2>Paths</h2>
+    <div className="flex min-h-0 flex-col gap-4">
+      <header className="flex items-center justify-between gap-3">
+        <button className={iconButtonClass} onClick={() => setDrawerMode('search')} type="button" aria-label="Edit search">
+          <ChevronLeft size={18} aria-hidden="true" />
+        </button>
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-lg font-bold text-ink">Paths</h2>
+          {state.status === 'success' && (
+            <p className="truncate text-xs font-medium text-muted">{compactPlaceName(state.city)}</p>
+          )}
+        </div>
+      </header>
+
+      {routes.length > 0 ? routeList : emptyContent}
+    </div>
+  )
+
+  const detailsContent = selectedRoute && (
+    <div className="flex min-h-0 flex-col gap-4">
+      <header className="flex items-start justify-between gap-3">
+        <button className={iconButtonClass} onClick={() => setDrawerMode('results')} type="button" aria-label="Back to paths">
+          <ChevronLeft size={18} aria-hidden="true" />
+        </button>
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-lg font-bold text-ink">{selectedRoute.name.replace(/^\d+\.\s/, '')}</h2>
+          <p className="text-xs font-medium text-muted">{formatCoords(selectedStart)}</p>
+        </div>
+        <strong className="text-2xl font-bold leading-none text-accent">{selectedRoute.score_total}</strong>
+      </header>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Metric icon={Route} label="Distance" value={km(selectedRoute.distance_km)} />
+        <Metric icon={Mountain} label="Gain" value={`${selectedRoute.elevation_gain_m} m`} />
+        <Metric icon={Gauge} label="Effort" value={selectedRoute.difficulty} />
+        <Metric icon={Trees} label="Green" value={pct(selectedRoute.facts.greenExposure)} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <button className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-line bg-white/[0.06] font-semibold text-ink" onClick={copySelectedCoords} type="button">
+          <Copy size={17} aria-hidden="true" />
+          {copiedCoords ? 'Copied' : 'GPS'}
+        </button>
+        <a className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-accent font-bold text-[#07100c]" href={googleMapsUrl(selectedStart)} target="_blank" rel="noreferrer">
+          <ExternalLink size={17} aria-hidden="true" />
+          Maps
+        </a>
+      </div>
+
+      <div className="grid gap-3">
+        <ScoreBar label="Fit" value={selectedRoute.score_breakdown.rideability} />
+        <ScoreBar label="Terrain" value={selectedRoute.score_breakdown.xc_character} />
+        <ScoreBar label="Nature" value={selectedRoute.score_breakdown.scenic_interest} />
+        <ScoreBar label="Roads" value={selectedRoute.score_breakdown.safety_comfort} />
+      </div>
+
+      <ul className="grid gap-2 border-t border-line pt-3 text-sm font-medium text-ink">
+        {selectedRoute.objective_reasons.slice(0, 3).map((reason) => (
+          <li className="flex items-center gap-2" key={reason}>
+            <ShieldCheck className="shrink-0 text-accent" size={15} aria-hidden="true" />
+            {reason}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+
+  const mobileDrawer = (
+    <Drawer.Root
+      direction="bottom"
+      dismissible
+      fixed
+      modal={false}
+      open={drawerMode !== null}
+      repositionInputs={false}
+      shouldScaleBackground={false}
+      onOpenChange={(open) => {
+        if (!open) setDrawerMode(null)
+      }}
+    >
+      <Drawer.Portal>
+        <Drawer.Content key={drawerMode} className="drawer-panel glass-panel" aria-label="Terrain drawer">
+          <div className="flex shrink-0 items-center justify-center px-4 pt-2">
+            <Drawer.Handle className="h-1.5 w-14 rounded-full bg-white/35" />
           </div>
+          <Drawer.Title className="sr-only">Terrain</Drawer.Title>
+          <Drawer.Description className="sr-only">Search, browse paths, and inspect route details.</Drawer.Description>
           <button
-            className="text-action"
-            onClick={resetToSearch}
+            className="absolute right-4 top-4 inline-grid h-9 w-9 place-items-center rounded-full border border-line bg-white/[0.06] text-muted transition hover:bg-white/[0.1] hover:text-ink"
+            onClick={() => setDrawerMode(null)}
             type="button"
+            aria-label="Close"
           >
-            New search
+            <X size={18} aria-hidden="true" />
           </button>
-        </header>
-
-        {routes.length > 0 && (
-          <div className="route-list">
-            {routes.map((route, index) => (
-            <button
-              className={`route-card ${selectedRoute?.id === route.id ? 'active' : ''}`}
-              key={route.id}
-              onClick={() => setSelectedRouteId(route.id)}
-              type="button"
-            >
-              <span style={{ background: routeColors[index % routeColors.length] }} />
-              <div>
-                <strong>{route.name}</strong>
-                <small>
-                  Score {route.score_total} · {km(route.distance_km)} · {route.difficulty}
-                </small>
-              </div>
-            </button>
-            ))}
+          <div ref={drawerBodyRef} className="min-h-0 overflow-y-auto overscroll-contain px-4 pb-5 pt-3 safe-bottom">
+            {drawerMode === 'search' && searchContent}
+            {drawerMode === 'results' && resultsContent}
+            {drawerMode === 'details' && detailsContent}
           </div>
-        )}
-
-        {selectedRoute && (
-          <section className="detail-panel">
-            <div className="detail-title">
-              <div>
-                <p>Selected path</p>
-                <h2>{selectedRoute.name.replace(/^\d+\.\s/, '')}</h2>
-              </div>
-              <strong>{selectedRoute.score_total}</strong>
-            </div>
-
-            <div className="metric-grid">
-              <Metric icon={Route} label="Distance" value={km(selectedRoute.distance_km)} />
-              <Metric icon={Mountain} label="Gain" value={`${selectedRoute.elevation_gain_m} m`} />
-              <Metric icon={Gauge} label="Effort" value={selectedRoute.difficulty} />
-              <Metric icon={Trees} label="Green" value={pct(selectedRoute.facts.greenExposure)} />
-            </div>
-
-            <div className="score-stack">
-              <ScoreBar label="Fit" value={selectedRoute.score_breakdown.rideability} />
-              <ScoreBar label="Terrain" value={selectedRoute.score_breakdown.xc_character} />
-              <ScoreBar label="Nature" value={selectedRoute.score_breakdown.scenic_interest} />
-              <ScoreBar label="Road comfort" value={selectedRoute.score_breakdown.safety_comfort} />
-              <ScoreBar label={useDistance ? 'Distance' : 'Effort'} value={selectedRoute.score_breakdown.practicality} />
-            </div>
-
-            <div className="facts-row">
-              <span>
-                <Layers3 size={15} aria-hidden="true" />
-                Real map geometry
-              </span>
-              <span>
-                <Waves size={15} aria-hidden="true" />
-                {pct(selectedRoute.facts.waterPasses)} water proximity
-              </span>
-            </div>
-
-            <ul className="reason-list">
-              {selectedRoute.objective_reasons.map((reason) => (
-                <li key={reason}>
-                  <ShieldCheck size={15} aria-hidden="true" />
-                  {reason}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        {state.status === 'loading' && (
-          <div className="empty-state">
-            <Loader2 className="spin" size={22} aria-hidden="true" />
-            <p>Searching map data...</p>
-          </div>
-        )}
-
-        {state.status === 'success' && !routes.length && (
-          <div className="empty-state">
-            <MapPin size={22} aria-hidden="true" />
-            <p>No clear paths found. Try another type or a nearby place.</p>
-          </div>
-        )}
-
-        {state.status === 'error' && (
-          <div className="empty-state">
-            <MapPin size={22} aria-hidden="true" />
-            <p>Search failed. Try again in a moment.</p>
-          </div>
-        )}
-    </>
+        </Drawer.Content>
+      </Drawer.Portal>
+    </Drawer.Root>
   )
 
   return (
-    <main className={`app-shell ${state.status === 'idle' ? 'no-results' : ''}`}>
-      {!isMobile && (
-        <aside className="control-panel" aria-label="Route search controls">
-          {searchContent}
-        </aside>
-      )}
-
-      {isMobile && (
-        <Drawer.Root
-          direction="bottom"
-          dismissible
-          fixed
-          open={controlOpen}
-          repositionInputs={false}
-          shouldScaleBackground={false}
-          onOpenChange={setControlOpen}
-        >
-          <Drawer.Portal>
-            <Drawer.Overlay className="mobile-drawer-overlay" />
-            <Drawer.Content className="mobile-drawer-content" aria-label="Route search controls">
-              <Drawer.Handle className="mobile-drawer-handle" />
-              <Drawer.Title className="sr-only">Search terrain</Drawer.Title>
-              <Drawer.Description className="sr-only">
-                Search for a place, choose movement settings, and find objective paths.
-              </Drawer.Description>
-              <button
-                className="drawer-close"
-                onClick={() => setControlOpen(false)}
-                type="button"
-                aria-label="Close search"
-              >
-                <X size={18} aria-hidden="true" />
-              </button>
-              {searchContent}
-            </Drawer.Content>
-          </Drawer.Portal>
-        </Drawer.Root>
-      )}
-
-      <section className="map-stage" aria-label="XC route map">
-        <div ref={mapElement} className="map-canvas" />
-        <div className="status-strip">
-          {state.status === 'loading' && (
-            <span>
-              <Loader2 className="spin" size={16} aria-hidden="true" />
-              {state.message}
-            </span>
-          )}
-          {state.status === 'error' && <span className="error">{state.message}</span>}
-          {state.status === 'success' && (
-            <span>
-              <CheckCircle2 size={16} aria-hidden="true" />
-              {routes.length > 0
-                ? `${routes.length} paths near ${state.city.displayName.split(',').slice(0, 2).join(', ')}`
-                : `No clear paths found near ${state.city.displayName.split(',').slice(0, 2).join(', ')}`}
-            </span>
-          )}
-        </div>
+    <main className="relative h-dvh min-h-svh overflow-hidden bg-[#07100c] text-ink">
+      <section className="absolute inset-0 overflow-hidden" aria-label="Route map">
+        <div ref={mapElement} className="absolute inset-0" />
       </section>
 
-      {isMobile && !controlOpen && state.status === 'idle' && (
-        <button className="mobile-fab" onClick={() => setControlOpen(true)} type="button">
+      {!isMobile && (
+        <>
+          <aside className="glass-panel absolute left-5 top-5 z-[460] flex max-h-[calc(100dvh-40px)] w-[360px] flex-col overflow-y-auto rounded-[28px] p-5" aria-label="Route search">
+            {searchContent}
+          </aside>
+          {state.status !== 'idle' && (
+            <aside className="glass-panel absolute right-5 top-5 z-[460] flex max-h-[calc(100dvh-40px)] w-[380px] flex-col overflow-y-auto rounded-[28px] p-5" aria-label="Paths">
+              {resultsContent}
+              {selectedRoute && <div className="mt-5 border-t border-line pt-5">{detailsContent}</div>}
+            </aside>
+          )}
+        </>
+      )}
+
+      {state.status === 'loading' && (
+        <div className="pointer-events-none absolute left-3 right-3 top-[max(14px,env(safe-area-inset-top))] z-[455] flex justify-center">
+          <span className="glass-panel inline-flex max-w-full items-center gap-2 rounded-full px-3 py-2 text-xs font-semibold text-muted">
+            <Loader2 className="animate-spin text-accent" size={16} aria-hidden="true" />
+            <span className="truncate">{state.message}</span>
+          </span>
+        </div>
+      )}
+
+      {isMobile && mobileDrawer}
+
+      {isMobile && drawerMode === null && selectedRoute && state.status === 'success' && (
+        <div className="glass-panel safe-bottom fixed inset-x-3 bottom-0 z-[1200] rounded-[24px] p-3">
+          <div className="flex items-center gap-3">
+            <button className="min-w-0 flex-1 text-left" onClick={() => setDrawerMode('details')} type="button">
+              <strong className="block truncate text-sm font-semibold text-ink">{selectedRoute.name.replace(/^\d+\.\s/, '')}</strong>
+              <span className="text-xs font-medium text-muted">{km(selectedRoute.distance_km)} / {selectedRoute.difficulty} / {formatCoords(selectedStart)}</span>
+            </button>
+            <button className={iconButtonClass} onClick={() => setDrawerMode('results')} type="button" aria-label="Paths">
+              <List size={18} aria-hidden="true" />
+            </button>
+            <a className={iconButtonClass} href={googleMapsUrl(selectedStart)} target="_blank" rel="noreferrer" aria-label="Open in Google Maps">
+              <ExternalLink size={18} aria-hidden="true" />
+            </a>
+          </div>
+        </div>
+      )}
+
+      {isMobile && drawerMode === null && state.status === 'idle' && (
+        <button className="fixed left-1/2 z-[1200] inline-flex h-12 min-w-32 -translate-x-1/2 items-center justify-center gap-2 rounded-full bg-accent px-5 font-bold text-[#07100c] shadow-panel bottom-[max(16px,calc(env(safe-area-inset-bottom)+16px))]" onClick={() => setDrawerMode('search')} type="button">
           <Search size={17} aria-hidden="true" />
           Search
         </button>
       )}
 
-      {isMobile && !resultsOpen && state.status !== 'idle' && (
-        <button className="mobile-fab" onClick={() => setResultsOpen(true)} type="button">
+      {isMobile && drawerMode === null && state.status !== 'idle' && !selectedRoute && (
+        <button className="fixed left-1/2 z-[1200] inline-flex h-12 min-w-32 -translate-x-1/2 items-center justify-center gap-2 rounded-full bg-accent px-5 font-bold text-[#07100c] shadow-panel bottom-[max(16px,calc(env(safe-area-inset-bottom)+16px))]" onClick={() => setDrawerMode('results')} type="button">
           <Route size={17} aria-hidden="true" />
           Paths
         </button>
       )}
 
-      {state.status !== 'idle' && !isMobile && (
-        <aside className="results-panel" aria-label="Ranked route candidates">
-          {resultsContent}
-        </aside>
-      )}
-
-      {state.status !== 'idle' && isMobile && (
-        <Drawer.Root
-          direction="bottom"
-          dismissible
-          fixed
-          open={resultsOpen}
-          repositionInputs={false}
-          shouldScaleBackground={false}
-          onOpenChange={setResultsOpen}
-        >
-          <Drawer.Portal>
-            <Drawer.Overlay className="mobile-drawer-overlay" />
-            <Drawer.Content className="mobile-drawer-content results-drawer" aria-label="Ranked route candidates">
-              <Drawer.Handle className="mobile-drawer-handle" />
-              <Drawer.Title className="sr-only">Route results</Drawer.Title>
-              <Drawer.Description className="sr-only">
-                Review ranked paths and open or close this results panel.
-              </Drawer.Description>
-              <button
-                className="drawer-close"
-                onClick={() => setResultsOpen(false)}
-                type="button"
-                aria-label="Close results"
-              >
-                <X size={18} aria-hidden="true" />
-              </button>
-              {resultsContent}
-            </Drawer.Content>
-          </Drawer.Portal>
-        </Drawer.Root>
+      {isMobile && drawerMode === null && state.status !== 'idle' && (
+        <button className="fixed left-3 top-[max(14px,env(safe-area-inset-top))] z-[1200] inline-flex h-10 items-center gap-2 rounded-full border border-line bg-black/35 px-3 text-sm font-semibold text-ink backdrop-blur-xl" onClick={() => setDrawerMode('search')} type="button">
+          <Pencil size={15} aria-hidden="true" />
+          Edit
+        </button>
       )}
     </main>
   )
