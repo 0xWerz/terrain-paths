@@ -941,8 +941,20 @@ function App() {
       {state.status !== 'idle' && (
       <aside className="results-panel" aria-label="Ranked route candidates">
         <header>
-          <p>Results</p>
-          <h2>Paths</h2>
+          <div>
+            <p>Results</p>
+            <h2>Paths</h2>
+          </div>
+          <button
+            className="text-action"
+            onClick={() => {
+              setState({ status: 'idle' })
+              setSelectedRouteId(null)
+            }}
+            type="button"
+          >
+            New search
+          </button>
         </header>
 
         {routes.length > 0 && (

@@ -1,14 +1,21 @@
 :root {
-  --paper: #f7f7f3;
+  --ink: #f7fbf3;
+  --paper: #07100c;
   --surface: #ffffff;
-  --ink: #111310;
-  --muted: #747870;
-  --faint: #a7aca4;
-  --line: #dfded7;
-  --line-strong: #b9bbb3;
-  --accent: #0f6f55;
-  --accent-soft: #edf5f1;
-  --body: ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;
+  --muted: rgba(247, 251, 243, 0.66);
+  --faint: rgba(247, 251, 243, 0.42);
+  --line: rgba(255, 255, 255, 0.16);
+  --line-strong: rgba(255, 255, 255, 0.28);
+  --accent: #9ee88e;
+  --accent-bright: #b8f5a6;
+  --accent-soft: rgba(184, 245, 166, 0.12);
+  --glass: linear-gradient(180deg, rgba(18, 28, 20, 0.78), rgba(9, 15, 11, 0.78));
+  --glass-line: rgba(255, 255, 255, 0.17);
+  --glass-ink: #f8fff5;
+  --glass-muted: rgba(248, 255, 245, 0.68);
+  --shadow: 0 28px 70px rgba(0, 0, 0, 0.34);
+  --body: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display",
+    "SF Pro Text", "Segoe UI", sans-serif;
 
   font-family: var(--body);
   font-size: 15px;
@@ -25,22 +32,44 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+}
+
 body {
   margin: 0;
   overflow: hidden;
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
 button:focus-visible,
-input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 3px;
 }
 
 .leaflet-container {
   font-family: var(--body);
+  background: #07100c;
+}
+
+.leaflet-control-attribution {
+  color: rgba(255, 255, 255, 0.58);
+  background: rgba(0, 0, 0, 0.32) !important;
+  backdrop-filter: blur(12px);
+}
+
+.leaflet-control-zoom a {
+  color: var(--glass-ink) !important;
+  background: rgba(11, 17, 13, 0.72) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
 }
