@@ -713,6 +713,10 @@ function routeStart(route: TerrainRoute | undefined) {
   return route?.geometry[0]
 }
 
+function routeEnd(route: TerrainRoute | undefined) {
+  return route?.geometry.at(-1)
+}
+
 function formatCoords(point: LatLngTuple | undefined) {
   if (!point) return ''
   return `${point[0].toFixed(6)}, ${point[1].toFixed(6)}`
@@ -721,6 +725,13 @@ function formatCoords(point: LatLngTuple | undefined) {
 function googleMapsUrl(point: LatLngTuple | undefined) {
   if (!point) return '#'
   return `https://www.google.com/maps/search/?api=1&query=${point[0]},${point[1]}`
+}
+
+function googleMapsRouteUrl(start: LatLngTuple | undefined, end: LatLngTuple | undefined) {
+  if (!start || !end) return '#'
+  const origin = `${start[0]},${start[1]}`
+  const destination = `${end[0]},${end[1]}`
+  return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=bicycling`
 }
 
 function App() {
@@ -754,6 +765,7 @@ function App() {
   )
   const activeStyle = styleConfig(activity, terrainStyle)
   const selectedStart = routeStart(selectedRoute)
+  const selectedEnd = routeEnd(selectedRoute)
 
   useEffect(() => {
     drawerBodyRef.current?.scrollTo({ top: 0 })
@@ -1159,17 +1171,24 @@ function App() {
     </div>
   )
 
+  const actionButtonClass =
+    'inline-flex h-11 min-w-0 items-center justify-center gap-1.5 rounded-2xl border border-line bg-white/[0.06] px-2 text-sm font-semibold text-ink transition hover:bg-white/[0.1]'
+
   const detailsContent = selectedRoute && (
     <div className="flex min-h-0 flex-col gap-4">
-      <header className="flex items-start justify-between gap-3">
+      <header className="flex items-start gap-3 pr-12">
         <button className={iconButtonClass} onClick={() => setDrawerMode('results')} type="button" aria-label="Back to paths">
           <ChevronLeft size={18} aria-hidden="true" />
         </button>
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-lg font-bold text-ink">{selectedRoute.name.replace(/^\d+\.\s/, '')}</h2>
-          <p className="text-xs font-medium text-muted">{formatCoords(selectedStart)}</p>
+          <div className="flex min-w-0 items-center gap-2">
+            <h2 className="truncate text-lg font-bold text-ink">{selectedRoute.name.replace(/^\d+\.\s/, '')}</h2>
+            <strong className="shrink-0 rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-sm font-bold leading-none text-accent">
+              {selectedRoute.score_total}
+            </strong>
+          </div>
+          <p className="mt-1 truncate text-xs font-medium text-muted">{formatCoords(selectedStart)}</p>
         </div>
-        <strong className="text-2xl font-bold leading-none text-accent">{selectedRoute.score_total}</strong>
       </header>
 
       <div className="grid grid-cols-2 gap-2">
@@ -1179,14 +1198,18 @@ function App() {
         <Metric icon={Trees} label="Green" value={pct(selectedRoute.facts.greenExposure)} />
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
-        <button className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-line bg-white/[0.06] font-semibold text-ink" onClick={copySelectedCoords} type="button">
+      <div className="grid grid-cols-3 gap-2">
+        <button className={actionButtonClass} onClick={copySelectedCoords} type="button">
           <Copy size={17} aria-hidden="true" />
           {copiedCoords ? 'Copied' : 'GPS'}
         </button>
-        <a className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-accent font-bold text-[#07100c]" href={googleMapsUrl(selectedStart)} target="_blank" rel="noreferrer">
+        <a className={actionButtonClass} href={googleMapsUrl(selectedStart)} target="_blank" rel="noreferrer">
           <ExternalLink size={17} aria-hidden="true" />
-          Maps
+          Start
+        </a>
+        <a className="inline-flex h-11 min-w-0 items-center justify-center gap-1.5 rounded-2xl bg-accent px-2 text-sm font-bold text-[#07100c]" href={googleMapsRouteUrl(selectedStart, selectedEnd)} target="_blank" rel="noreferrer">
+          <Navigation size={17} aria-hidden="true" />
+          Route
         </a>
       </div>
 
@@ -1287,8 +1310,11 @@ function App() {
             <button className={iconButtonClass} onClick={() => setDrawerMode('results')} type="button" aria-label="Paths">
               <List size={18} aria-hidden="true" />
             </button>
-            <a className={iconButtonClass} href={googleMapsUrl(selectedStart)} target="_blank" rel="noreferrer" aria-label="Open in Google Maps">
+            <a className={iconButtonClass} href={googleMapsUrl(selectedStart)} target="_blank" rel="noreferrer" aria-label="Open start in Google Maps">
               <ExternalLink size={18} aria-hidden="true" />
+            </a>
+            <a className={iconButtonClass} href={googleMapsRouteUrl(selectedStart, selectedEnd)} target="_blank" rel="noreferrer" aria-label="Open route in Google Maps">
+              <Navigation size={18} aria-hidden="true" />
             </a>
           </div>
         </div>
