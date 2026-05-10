@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { Drawer } from 'vaul'
 import {
   Bike,
   CheckCircle2,
@@ -17,6 +18,7 @@ import {
   SlidersHorizontal,
   Trees,
   Waves,
+  X,
 } from 'lucide-react'
 import './App.css'
 
@@ -38,6 +40,19 @@ type CityResult = {
   lat: number
   lon: number
   boundingBox: [number, number, number, number]
+}
+
+type CitySuggestionState =
+  | { status: 'idle'; items: CityResult[] }
+  | { status: 'loading'; items: CityResult[] }
+  | { status: 'ready'; items: CityResult[] }
+  | { status: 'error'; items: CityResult[] }
+
+type NominatimResult = {
+  display_name: string
+  lat: string
+  lon: string
+  boundingbox?: string[]
 }
 
 type OsmTags = Record<string, string | undefined>
@@ -266,6 +281,22 @@ function km(value: number) {
   return `${value.toFixed(value >= 10 ? 0 : 1)} km`
 }
 
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() =>
+    typeof window === 'undefined' ? false : window.matchMedia(query).matches,
+  )
+
+  useEffect(() => {
+    const matcher = window.matchMedia(query)
+    const update = () => setMatches(matcher.matches)
+    update()
+    matcher.addEventListener('change', update)
+    return () => matcher.removeEventListener('change', update)
+  }, [query])
+
+  return matches
+}
+
 function haversineKm(a: LatLngTuple, b: LatLngTuple) {
   const radius = 6371
   const toRad = Math.PI / 180
@@ -354,24 +385,52 @@ function pseudoElevation(point: LatLngTuple) {
   )
 }
 
-async function geocodeCity(city: string): Promise<CityResult> {
-  const params = new URLSearchParams({
-    q: city,
-    format: 'jsonv2',
-    limit: '1',
-    addressdetails: '1',
-  })
-  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`)
-  if (!response.ok) throw new Error('City search failed.')
-  const [result] = await response.json()
-  if (!result) throw new Error(`No city match found for "${city}".`)
+function normalizeCityResult(result: NominatimResult): CityResult {
+  const lat = Number(result.lat)
+  const lon = Number(result.lon)
+  const rawBox = result.boundingbox?.map(Number)
+  const boundingBox =
+    rawBox && rawBox.length === 4
+      ? (rawBox as [number, number, number, number])
+      : ([lat, lat, lon, lon] as [number, number, number, number])
 
   return {
     displayName: result.display_name,
-    lat: Number(result.lat),
-    lon: Number(result.lon),
-    boundingBox: result.boundingbox.map(Number) as [number, number, number, number],
+    lat,
+    lon,
+    boundingBox,
   }
+}
+
+function compactPlaceName(place: CityResult) {
+  return place.displayName.split(',').slice(0, 3).join(', ')
+}
+
+async function geocodeCities(
+  city: string,
+  limit = 5,
+  signal?: AbortSignal,
+): Promise<CityResult[]> {
+  const params = new URLSearchParams({
+    q: city,
+    format: 'jsonv2',
+    limit: String(limit),
+    addressdetails: '1',
+    dedupe: '1',
+    'accept-language': 'en',
+  })
+  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
+    signal,
+  })
+  if (!response.ok) throw new Error('City search failed.')
+  const results = (await response.json()) as NominatimResult[]
+  return results.map(normalizeCityResult)
+}
+
+async function geocodeCity(city: string): Promise<CityResult> {
+  const [result] = await geocodeCities(city, 1)
+  if (!result) throw new Error(`No city match found for "${city}".`)
+  return result
 }
 
 async function fetchObjectiveMapData(city: CityResult) {
@@ -649,6 +708,12 @@ function Metric({ icon: Icon, label, value }: { icon: typeof Route; label: strin
 
 function App() {
   const [city, setCity] = useState(DEFAULT_CITY)
+  const [selectedCity, setSelectedCity] = useState<CityResult | null>(null)
+  const [cityFocused, setCityFocused] = useState(false)
+  const [citySuggestionState, setCitySuggestionState] = useState<CitySuggestionState>({
+    status: 'idle',
+    items: [],
+  })
   const [activity, setActivity] = useState<ActivityMode>('bike')
   const [terrainStyle, setTerrainStyle] = useState<TerrainStyle>('xc')
   const [distance, setDistance] = useState(32)
@@ -656,10 +721,13 @@ function App() {
   const [difficulty, setDifficulty] = useState<Difficulty>('moderate')
   const [state, setState] = useState<SearchState>({ status: 'idle' })
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null)
+  const [controlOpen, setControlOpen] = useState(true)
+  const [resultsOpen, setResultsOpen] = useState(false)
   const mapElement = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const routeLayer = useRef<L.LayerGroup | null>(null)
   const fittedRouteSet = useRef('')
+  const isMobile = useMediaQuery('(max-width: 900px)')
 
   const routes = useMemo(() => (state.status === 'success' ? state.routes : []), [state])
   const selectedRoute = useMemo(
@@ -668,15 +736,41 @@ function App() {
   )
   const activeStyle = styleConfig(activity, terrainStyle)
 
+  useEffect(() => {
+    if (!cityFocused || selectedCity || city.trim().length < 2) {
+      return
+    }
+
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => {
+      setCitySuggestionState((current) => ({ status: 'loading', items: current.items }))
+      geocodeCities(city.trim(), 5, controller.signal)
+        .then((items) => setCitySuggestionState({ status: 'ready', items }))
+        .catch((error: unknown) => {
+          if (error instanceof DOMException && error.name === 'AbortError') return
+          setCitySuggestionState({ status: 'error', items: [] })
+        })
+    }, 260)
+
+    return () => {
+      window.clearTimeout(timeout)
+      controller.abort()
+    }
+  }, [city, cityFocused, selectedCity])
+
   const runSearch = useCallback(async (event?: FormEvent) => {
     event?.preventDefault()
     if (!city.trim()) return
-    setState({ status: 'loading', message: 'Resolving city and reading objective terrain data...' })
+    setControlOpen(false)
+    setResultsOpen(true)
+    setCityFocused(false)
+    setCitySuggestionState({ status: 'idle', items: [] })
+    setState({ status: 'loading', message: 'Reading map and terrain data...' })
     setSelectedRouteId(null)
 
     try {
-      const cityResult = await geocodeCity(city.trim())
-      setState({ status: 'loading', message: 'Querying OSM ways, surfaces, access tags, and natural features...' })
+      const cityResult = selectedCity ?? (await geocodeCity(city.trim()))
+      setState({ status: 'loading', message: 'Checking paths, surfaces, access, and natural areas...' })
       const data = await fetchObjectiveMapData(cityResult).catch(() => ({ ways: [], features: [] }))
       const generatedRoutes = generateRoutes(
         cityResult,
@@ -689,13 +783,15 @@ function App() {
       )
       setState({ status: 'success', city: cityResult, routes: generatedRoutes })
       setSelectedRouteId(generatedRoutes[0]?.id ?? null)
+      setResultsOpen(true)
     } catch (error) {
       setState({
         status: 'error',
         message: error instanceof Error ? error.message : 'Terrain analysis failed.',
       })
+      setResultsOpen(true)
     }
-  }, [activity, city, difficulty, distance, terrainStyle, useDistance])
+  }, [activity, city, difficulty, distance, selectedCity, terrainStyle, useDistance])
 
   useEffect(() => {
     if (!mapElement.current || mapRef.current) return
@@ -784,9 +880,21 @@ function App() {
     }
   }, [routes, selectedRoute])
 
-  return (
-    <main className={`app-shell ${state.status === 'idle' ? 'no-results' : ''}`}>
-      <aside className="control-panel" aria-label="XC route search controls">
+  const resetToSearch = () => {
+    setState({ status: 'idle' })
+    setSelectedRouteId(null)
+    setResultsOpen(false)
+    setControlOpen(true)
+  }
+
+  const citySuggestionsVisible =
+    cityFocused &&
+    !selectedCity &&
+    city.trim().length >= 2 &&
+    (citySuggestionState.status === 'loading' || citySuggestionState.items.length > 0)
+
+  const searchContent = (
+    <>
         <div className="brand-line">
           <Bike size={24} aria-hidden="true" />
           <div>
@@ -796,15 +904,50 @@ function App() {
         </div>
 
         <form className="search-panel" onSubmit={runSearch}>
-          <label htmlFor="city">Place</label>
-          <div className="search-field">
-            <Search size={18} aria-hidden="true" />
-            <input
-              id="city"
-              value={city}
-              onChange={(event) => setCity(event.target.value)}
-              placeholder="Search a city"
-            />
+          <div className="city-control">
+            <label htmlFor="city">Place</label>
+            <div className="search-field">
+              <Search size={18} aria-hidden="true" />
+              <input
+                autoComplete="off"
+                id="city"
+                value={city}
+                onBlur={() => window.setTimeout(() => setCityFocused(false), 120)}
+                onChange={(event) => {
+                  const nextCity = event.target.value
+                  setCity(nextCity)
+                  setSelectedCity(null)
+                  if (nextCity.trim().length < 2) {
+                    setCitySuggestionState({ status: 'idle', items: [] })
+                  }
+                }}
+                onFocus={() => setCityFocused(true)}
+                placeholder="Search a city"
+              />
+            </div>
+            {citySuggestionsVisible && (
+              <div className="city-suggestions" role="listbox">
+                {citySuggestionState.items.map((place) => (
+                  <button
+                    key={`${place.lat}-${place.lon}-${place.displayName}`}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => {
+                      setSelectedCity(place)
+                      setCity(compactPlaceName(place))
+                      setCitySuggestionState({ status: 'idle', items: [] })
+                      setCityFocused(false)
+                    }}
+                    type="button"
+                  >
+                    <strong>{place.displayName.split(',')[0]}</strong>
+                    <span>{place.displayName.split(',').slice(1, 4).join(', ')}</span>
+                  </button>
+                ))}
+                {citySuggestionState.status === 'loading' && (
+                  <div className="city-suggestion-status">Searching places...</div>
+                )}
+              </div>
+            )}
           </div>
 
           <fieldset>
@@ -915,31 +1058,11 @@ function App() {
           </div>
           <p>Uses map data, road type, surface, and nature nearby. Distance is optional. No ratings or reviews.</p>
         </section>
-      </aside>
+    </>
+  )
 
-      <section className="map-stage" aria-label="XC route map">
-        <div ref={mapElement} className="map-canvas" />
-        <div className="status-strip">
-          {state.status === 'loading' && (
-            <span>
-              <Loader2 className="spin" size={16} aria-hidden="true" />
-              {state.message}
-            </span>
-          )}
-          {state.status === 'error' && <span className="error">{state.message}</span>}
-          {state.status === 'success' && (
-            <span>
-              <CheckCircle2 size={16} aria-hidden="true" />
-              {routes.length > 0
-                ? `${routes.length} paths near ${state.city.displayName.split(',').slice(0, 2).join(', ')}`
-                : `No clear paths found near ${state.city.displayName.split(',').slice(0, 2).join(', ')}`}
-            </span>
-          )}
-        </div>
-      </section>
-
-      {state.status !== 'idle' && (
-      <aside className="results-panel" aria-label="Ranked route candidates">
+  const resultsContent = (
+    <>
         <header>
           <div>
             <p>Results</p>
@@ -947,10 +1070,7 @@ function App() {
           </div>
           <button
             className="text-action"
-            onClick={() => {
-              setState({ status: 'idle' })
-              setSelectedRouteId(null)
-            }}
+            onClick={resetToSearch}
             type="button"
           >
             New search
@@ -1035,7 +1155,7 @@ function App() {
         {state.status === 'success' && !routes.length && (
           <div className="empty-state">
             <MapPin size={22} aria-hidden="true" />
-            <p>No clear paths found. Try a shorter distance, another type, or a nearby place.</p>
+            <p>No clear paths found. Try another type or a nearby place.</p>
           </div>
         )}
 
@@ -1045,7 +1165,120 @@ function App() {
             <p>Search failed. Try again in a moment.</p>
           </div>
         )}
-      </aside>
+    </>
+  )
+
+  return (
+    <main className={`app-shell ${state.status === 'idle' ? 'no-results' : ''}`}>
+      {!isMobile && (
+        <aside className="control-panel" aria-label="Route search controls">
+          {searchContent}
+        </aside>
+      )}
+
+      {isMobile && (
+        <Drawer.Root
+          direction="bottom"
+          dismissible
+          fixed
+          open={controlOpen}
+          repositionInputs={false}
+          shouldScaleBackground={false}
+          onOpenChange={setControlOpen}
+        >
+          <Drawer.Portal>
+            <Drawer.Overlay className="mobile-drawer-overlay" />
+            <Drawer.Content className="mobile-drawer-content" aria-label="Route search controls">
+              <Drawer.Handle className="mobile-drawer-handle" />
+              <Drawer.Title className="sr-only">Search terrain</Drawer.Title>
+              <Drawer.Description className="sr-only">
+                Search for a place, choose movement settings, and find objective paths.
+              </Drawer.Description>
+              <button
+                className="drawer-close"
+                onClick={() => setControlOpen(false)}
+                type="button"
+                aria-label="Close search"
+              >
+                <X size={18} aria-hidden="true" />
+              </button>
+              {searchContent}
+            </Drawer.Content>
+          </Drawer.Portal>
+        </Drawer.Root>
+      )}
+
+      <section className="map-stage" aria-label="XC route map">
+        <div ref={mapElement} className="map-canvas" />
+        <div className="status-strip">
+          {state.status === 'loading' && (
+            <span>
+              <Loader2 className="spin" size={16} aria-hidden="true" />
+              {state.message}
+            </span>
+          )}
+          {state.status === 'error' && <span className="error">{state.message}</span>}
+          {state.status === 'success' && (
+            <span>
+              <CheckCircle2 size={16} aria-hidden="true" />
+              {routes.length > 0
+                ? `${routes.length} paths near ${state.city.displayName.split(',').slice(0, 2).join(', ')}`
+                : `No clear paths found near ${state.city.displayName.split(',').slice(0, 2).join(', ')}`}
+            </span>
+          )}
+        </div>
+      </section>
+
+      {isMobile && !controlOpen && state.status === 'idle' && (
+        <button className="mobile-fab" onClick={() => setControlOpen(true)} type="button">
+          <Search size={17} aria-hidden="true" />
+          Search
+        </button>
+      )}
+
+      {isMobile && !resultsOpen && state.status !== 'idle' && (
+        <button className="mobile-fab" onClick={() => setResultsOpen(true)} type="button">
+          <Route size={17} aria-hidden="true" />
+          Paths
+        </button>
+      )}
+
+      {state.status !== 'idle' && !isMobile && (
+        <aside className="results-panel" aria-label="Ranked route candidates">
+          {resultsContent}
+        </aside>
+      )}
+
+      {state.status !== 'idle' && isMobile && (
+        <Drawer.Root
+          direction="bottom"
+          dismissible
+          fixed
+          open={resultsOpen}
+          repositionInputs={false}
+          shouldScaleBackground={false}
+          onOpenChange={setResultsOpen}
+        >
+          <Drawer.Portal>
+            <Drawer.Overlay className="mobile-drawer-overlay" />
+            <Drawer.Content className="mobile-drawer-content results-drawer" aria-label="Ranked route candidates">
+              <Drawer.Handle className="mobile-drawer-handle" />
+              <Drawer.Title className="sr-only">Route results</Drawer.Title>
+              <Drawer.Description className="sr-only">
+                Review ranked paths and open or close this results panel.
+              </Drawer.Description>
+              <button
+                className="drawer-close"
+                onClick={() => setResultsOpen(false)}
+                type="button"
+                aria-label="Close results"
+              >
+                <X size={18} aria-hidden="true" />
+              </button>
+              {resultsContent}
+            </Drawer.Content>
+          </Drawer.Portal>
+        </Drawer.Root>
       )}
     </main>
   )
