@@ -83,7 +83,7 @@
   }
 
   .safe-bottom {
-    padding-bottom: max(16px, calc(env(safe-area-inset-bottom) + 16px));
+    padding-bottom: max(14px, env(safe-area-inset-bottom));
   }
 }
 
@@ -100,7 +100,7 @@
 
 .leaflet-control-zoom {
   margin-right: max(12px, env(safe-area-inset-right)) !important;
-  margin-bottom: max(84px, calc(env(safe-area-inset-bottom) + 84px)) !important;
+  margin-bottom: max(76px, calc(env(safe-area-inset-bottom) + 72px)) !important;
 }
 
 .leaflet-control-zoom a {

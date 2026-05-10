@@ -11,6 +11,7 @@ import {
   Gauge,
   List,
   Loader2,
+  LocateFixed,
   MapPin,
   Mountain,
   Navigation,
@@ -54,6 +55,14 @@ type NominatimResult = {
   lat: string
   lon: string
   boundingbox?: string[]
+}
+
+type ReverseGeocodeResult = {
+  display_name?: string
+  lat?: string
+  lon?: string
+  boundingbox?: string[]
+  address?: Record<string, string | undefined>
 }
 
 type OsmTags = Record<string, string | undefined>
@@ -117,8 +126,10 @@ type SearchState =
   | { status: 'error'; message: string }
 
 type DrawerMode = 'search' | 'results' | 'details' | null
+type LocationState = 'idle' | 'locating' | 'ready' | 'blocked' | 'error'
 
 const DEFAULT_CITY = ''
+const LOCATION_STORAGE_KEY = 'terrain-location-enabled'
 const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass-api.de/api/interpreter',
@@ -436,6 +447,64 @@ async function geocodeCity(city: string): Promise<CityResult> {
   return result
 }
 
+async function reverseGeocodeLocation(lat: number, lon: number): Promise<CityResult> {
+  const params = new URLSearchParams({
+    lat: String(lat),
+    lon: String(lon),
+    format: 'jsonv2',
+    addressdetails: '1',
+    zoom: '12',
+    'accept-language': 'en',
+  })
+  const response = await fetch(`https://nominatim.openstreetmap.org/reverse?${params}`)
+  if (!response.ok) throw new Error('Location lookup failed.')
+  const result = (await response.json()) as ReverseGeocodeResult
+  const address = result.address ?? {}
+  const placeName =
+    [address.city, address.town, address.village, address.state, address.country].filter(Boolean).join(', ') ||
+    result.display_name ||
+    `Current location (${lat.toFixed(4)}, ${lon.toFixed(4)})`
+  const rawBox = result.boundingbox?.map(Number)
+  const boundingBox =
+    rawBox && rawBox.length === 4
+      ? (rawBox as [number, number, number, number])
+      : ([lat, lat, lon, lon] as [number, number, number, number])
+
+  return {
+    displayName: placeName,
+    lat: Number(result.lat ?? lat),
+    lon: Number(result.lon ?? lon),
+    boundingBox,
+  }
+}
+
+function getBrowserPosition(): Promise<GeolocationPosition> {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('GPS is not available in this browser.'))
+      return
+    }
+
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      maximumAge: 5 * 60 * 1000,
+      timeout: 12000,
+    })
+  })
+}
+
+async function shouldAutoUseLocation() {
+  if (!navigator.geolocation) return false
+  if (window.localStorage.getItem(LOCATION_STORAGE_KEY) === '1') return true
+
+  try {
+    const permission = await navigator.permissions?.query({ name: 'geolocation' as PermissionName })
+    return permission?.state === 'granted'
+  } catch {
+    return false
+  }
+}
+
 async function fetchObjectiveMapData(city: CityResult) {
   const radius = 8500
   const query = `
@@ -750,12 +819,14 @@ function App() {
   const [state, setState] = useState<SearchState>({ status: 'idle' })
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null)
   const [drawerMode, setDrawerMode] = useState<DrawerMode>('search')
+  const [locationState, setLocationState] = useState<LocationState>('idle')
   const [copiedCoords, setCopiedCoords] = useState(false)
   const mapElement = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const routeLayer = useRef<L.LayerGroup | null>(null)
   const fittedRouteSet = useRef('')
   const drawerBodyRef = useRef<HTMLDivElement | null>(null)
+  const locationBootRef = useRef(false)
   const isMobile = useMediaQuery('(max-width: 900px)')
 
   const routes = useMemo(() => (state.status === 'success' ? state.routes : []), [state])
@@ -824,9 +895,7 @@ function App() {
     }
   }, [city, cityFocused, selectedCity])
 
-  const runSearch = useCallback(async (event?: FormEvent) => {
-    event?.preventDefault()
-    if (!city.trim()) return
+  const searchFromCity = useCallback(async (cityResult: CityResult) => {
     setDrawerMode('results')
     setCityFocused(false)
     setCitySuggestionState({ status: 'idle', items: [] })
@@ -834,7 +903,6 @@ function App() {
     setSelectedRouteId(null)
 
     try {
-      const cityResult = selectedCity ?? (await geocodeCity(city.trim()))
       setState({ status: 'loading', message: 'Checking paths, surfaces, access, and natural areas...' })
       const data = await fetchObjectiveMapData(cityResult).catch(() => ({ ways: [], features: [] }))
       const generatedRoutes = generateRoutes(
@@ -856,7 +924,60 @@ function App() {
       })
       setDrawerMode('results')
     }
-  }, [activity, city, difficulty, distance, selectedCity, terrainStyle, useDistance])
+  }, [activity, difficulty, distance, terrainStyle, useDistance])
+
+  const runSearch = useCallback(async (event?: FormEvent) => {
+    event?.preventDefault()
+    if (!city.trim()) return
+
+    try {
+      const cityResult = selectedCity ?? (await geocodeCity(city.trim()))
+      setSelectedCity(cityResult)
+      setCity(compactPlaceName(cityResult))
+      await searchFromCity(cityResult)
+    } catch (error) {
+      setState({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Place lookup failed.',
+      })
+      setDrawerMode('results')
+    }
+  }, [city, searchFromCity, selectedCity])
+
+  const requestCurrentLocation = useCallback(async () => {
+    setLocationState('locating')
+
+    try {
+      const position = await getBrowserPosition()
+      const lat = position.coords.latitude
+      const lon = position.coords.longitude
+      const cityResult = await reverseGeocodeLocation(lat, lon).catch(() => ({
+        displayName: `Current location (${lat.toFixed(4)}, ${lon.toFixed(4)})`,
+        lat,
+        lon,
+        boundingBox: [lat, lat, lon, lon] as [number, number, number, number],
+      }))
+      window.localStorage.setItem(LOCATION_STORAGE_KEY, '1')
+      setLocationState('ready')
+      setSelectedCity(cityResult)
+      setCity(compactPlaceName(cityResult))
+      mapRef.current?.setView([cityResult.lat, cityResult.lon], 13, { animate: true })
+      await searchFromCity(cityResult)
+    } catch (error) {
+      window.localStorage.removeItem(LOCATION_STORAGE_KEY)
+      const denied = typeof error === 'object' && error !== null && 'code' in error && error.code === 1
+      setLocationState(denied ? 'blocked' : 'error')
+    }
+  }, [searchFromCity])
+
+  useEffect(() => {
+    if (locationBootRef.current || city.trim()) return
+    locationBootRef.current = true
+
+    shouldAutoUseLocation().then((useLocation) => {
+      if (useLocation) void requestCurrentLocation()
+    })
+  }, [city, requestCurrentLocation])
 
   useEffect(() => {
     if (!mapElement.current || mapRef.current) return
@@ -958,6 +1079,18 @@ function App() {
     'inline-grid h-9 w-9 place-items-center rounded-full border border-line bg-white/[0.06] text-muted transition hover:bg-white/[0.1] hover:text-ink'
   const primaryButtonClass =
     'inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-accent px-4 font-bold text-[#07100c] shadow-[0_14px_30px_rgba(168,236,151,0.22)] transition disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none'
+  const locationButtonText =
+    locationState === 'locating'
+      ? 'Finding location'
+      : locationState === 'ready'
+        ? 'Use current location'
+        : 'Use current location'
+  const locationHint =
+    locationState === 'blocked'
+      ? 'Location is blocked. You can still search a city.'
+      : locationState === 'error'
+        ? 'Could not get location. Try a city search.'
+        : ''
 
   const searchContent = (
     <div className="flex min-h-0 flex-col gap-5">
@@ -969,6 +1102,20 @@ function App() {
       <form className="grid gap-4" onSubmit={runSearch}>
         <div className="relative grid gap-2">
           <label className={labelClass} htmlFor="city">Place</label>
+          <button
+            className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl border border-accent/30 bg-accent/12 px-4 text-sm font-bold text-accent transition hover:bg-accent/18 disabled:cursor-not-allowed disabled:opacity-55"
+            disabled={locationState === 'locating' || state.status === 'loading'}
+            onClick={requestCurrentLocation}
+            type="button"
+          >
+            {locationState === 'locating' ? (
+              <Loader2 className="animate-spin" size={18} aria-hidden="true" />
+            ) : (
+              <LocateFixed size={18} aria-hidden="true" />
+            )}
+            {locationButtonText}
+          </button>
+          {locationHint && <p className="m-0 text-xs font-medium text-muted">{locationHint}</p>}
           <div className={cn(fieldClass, 'grid grid-cols-[20px_1fr] items-center gap-3 px-4')}>
             <Search className="text-muted" size={18} aria-hidden="true" />
             <input
@@ -1259,7 +1406,7 @@ function App() {
           >
             <X size={18} aria-hidden="true" />
           </button>
-          <div ref={drawerBodyRef} className="min-h-0 overflow-y-auto overscroll-contain px-4 pb-5 pt-3 safe-bottom">
+          <div ref={drawerBodyRef} className="min-h-0 overflow-y-auto overscroll-contain px-4 pt-3 safe-bottom">
             {drawerMode === 'search' && searchContent}
             {drawerMode === 'results' && resultsContent}
             {drawerMode === 'details' && detailsContent}
@@ -1301,7 +1448,7 @@ function App() {
       {isMobile && mobileDrawer}
 
       {isMobile && drawerMode === null && selectedRoute && state.status === 'success' && (
-        <div className="glass-panel safe-bottom fixed inset-x-3 bottom-0 z-[1200] rounded-[24px] p-3">
+        <div className="glass-panel fixed inset-x-3 z-[1200] rounded-[24px] p-3 bottom-[max(8px,env(safe-area-inset-bottom))]">
           <div className="flex items-center gap-3">
             <button className="min-w-0 flex-1 text-left" onClick={() => setDrawerMode('details')} type="button">
               <strong className="block truncate text-sm font-semibold text-ink">{selectedRoute.name.replace(/^\d+\.\s/, '')}</strong>
@@ -1321,14 +1468,14 @@ function App() {
       )}
 
       {isMobile && drawerMode === null && state.status === 'idle' && (
-        <button className="fixed left-1/2 z-[1200] inline-flex h-12 min-w-32 -translate-x-1/2 items-center justify-center gap-2 rounded-full bg-accent px-5 font-bold text-[#07100c] shadow-panel bottom-[max(16px,calc(env(safe-area-inset-bottom)+16px))]" onClick={() => setDrawerMode('search')} type="button">
+        <button className="fixed left-1/2 z-[1200] inline-flex h-12 min-w-32 -translate-x-1/2 items-center justify-center gap-2 rounded-full bg-accent px-5 font-bold text-[#07100c] shadow-panel bottom-[max(12px,calc(env(safe-area-inset-bottom)+8px))]" onClick={() => setDrawerMode('search')} type="button">
           <Search size={17} aria-hidden="true" />
           Search
         </button>
       )}
 
       {isMobile && drawerMode === null && state.status !== 'idle' && !selectedRoute && (
-        <button className="fixed left-1/2 z-[1200] inline-flex h-12 min-w-32 -translate-x-1/2 items-center justify-center gap-2 rounded-full bg-accent px-5 font-bold text-[#07100c] shadow-panel bottom-[max(16px,calc(env(safe-area-inset-bottom)+16px))]" onClick={() => setDrawerMode('results')} type="button">
+        <button className="fixed left-1/2 z-[1200] inline-flex h-12 min-w-32 -translate-x-1/2 items-center justify-center gap-2 rounded-full bg-accent px-5 font-bold text-[#07100c] shadow-panel bottom-[max(12px,calc(env(safe-area-inset-bottom)+8px))]" onClick={() => setDrawerMode('results')} type="button">
           <Route size={17} aria-hidden="true" />
           Paths
         </button>
