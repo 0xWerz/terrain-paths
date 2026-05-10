@@ -5,10 +5,13 @@ import 'leaflet/dist/leaflet.css'
 import { Drawer } from 'vaul'
 import {
   Bike,
+  Bookmark,
+  BookmarkCheck,
   ChevronLeft,
   Copy,
   ExternalLink,
   Gauge,
+  History,
   List,
   Loader2,
   LocateFixed,
@@ -19,6 +22,7 @@ import {
   Route,
   Search,
   ShieldCheck,
+  Sparkles,
   Trees,
   X,
 } from 'lucide-react'
@@ -122,14 +126,39 @@ type TerrainRoute = {
 type SearchState =
   | { status: 'idle' }
   | { status: 'loading'; message: string }
-  | { status: 'success'; city: CityResult; routes: TerrainRoute[] }
+  | { status: 'success'; city: CityResult; routes: TerrainRoute[]; source?: 'cache' | 'live'; cachedAt?: number }
   | { status: 'error'; message: string }
 
 type DrawerMode = 'search' | 'results' | 'details' | null
 type LocationState = 'idle' | 'locating' | 'ready' | 'blocked' | 'error'
 
+type RecentPlace = CityResult & {
+  id: string
+  usedAt: number
+}
+
+type SavedRoute = {
+  id: string
+  savedAt: number
+  city: CityResult
+  activity: ActivityMode
+  terrainStyle: TerrainStyle
+  route: TerrainRoute
+}
+
+type CachedRoutes = {
+  key: string
+  createdAt: number
+  city: CityResult
+  routes: TerrainRoute[]
+}
+
 const DEFAULT_CITY = ''
 const LOCATION_STORAGE_KEY = 'terrain-location-enabled'
+const SAVED_ROUTES_KEY = 'terrain-saved-routes'
+const RECENT_PLACES_KEY = 'terrain-recent-places'
+const ROUTE_CACHE_KEY = 'terrain-route-cache'
+const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass-api.de/api/interpreter',
@@ -280,6 +309,19 @@ function clamp(value: number, min = 0, max = 100) {
   return Math.min(max, Math.max(min, value))
 }
 
+function readJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function writeJson<T>(key: string, value: T) {
+  window.localStorage.setItem(key, JSON.stringify(value))
+}
+
 function styleConfig(activity: ActivityMode, style: TerrainStyle) {
   return (
     activityStyles[activity].find((option) => option.id === style) ??
@@ -418,6 +460,62 @@ function normalizeCityResult(result: NominatimResult): CityResult {
 
 function compactPlaceName(place: CityResult) {
   return place.displayName.split(',').slice(0, 3).join(', ')
+}
+
+function placeId(place: CityResult) {
+  return `${place.lat.toFixed(4)},${place.lon.toFixed(4)}`
+}
+
+function routeSaveId(route: TerrainRoute) {
+  const start = routeStart(route)
+  return `${route.id}-${start?.[0].toFixed(5) ?? 'x'}-${start?.[1].toFixed(5) ?? 'x'}-${route.distance_km.toFixed(1)}`
+}
+
+function cacheKeyFor(
+  city: CityResult,
+  activity: ActivityMode,
+  style: TerrainStyle,
+  difficulty: Difficulty,
+  distance: number,
+  useDistance: boolean,
+  nearOrigin: LatLngTuple | null,
+) {
+  const origin = nearOrigin ? `${nearOrigin[0].toFixed(3)},${nearOrigin[1].toFixed(3)}` : 'city'
+  return [
+    placeId(city),
+    activity,
+    style,
+    difficulty,
+    useDistance ? distance : 'any',
+    origin,
+  ].join('|')
+}
+
+function saveRecentPlace(place: CityResult) {
+  const recent = readJson<RecentPlace[]>(RECENT_PLACES_KEY, [])
+  const next = [
+    { ...place, id: placeId(place), usedAt: Date.now() },
+    ...recent.filter((item) => item.id !== placeId(place)),
+  ].slice(0, 5)
+  writeJson(RECENT_PLACES_KEY, next)
+  return next
+}
+
+function readRouteCache(key: string) {
+  const cache = readJson<Record<string, CachedRoutes>>(ROUTE_CACHE_KEY, {})
+  const cached = cache[key]
+  if (!cached || Date.now() - cached.createdAt > CACHE_TTL_MS) return null
+  return cached
+}
+
+function writeRouteCache(entry: CachedRoutes) {
+  const cache = readJson<Record<string, CachedRoutes>>(ROUTE_CACHE_KEY, {})
+  const next = Object.fromEntries(
+    Object.entries({ ...cache, [entry.key]: entry })
+      .sort((a, b) => b[1].createdAt - a[1].createdAt)
+      .slice(0, 20),
+  )
+  writeJson(ROUTE_CACHE_KEY, next)
 }
 
 async function geocodeCities(
@@ -568,6 +666,7 @@ function generateRoutes(
   desiredDifficulty: Difficulty,
   activity: ActivityMode,
   style: TerrainStyle,
+  nearOrigin: LatLngTuple | null,
 ): TerrainRoute[] {
   const center: LatLngTuple = [city.lat, city.lon]
   const profile = styleConfig(activity, style)
@@ -582,7 +681,11 @@ function generateRoutes(
         ? Math.max(0.2, 1 - Math.abs(distance - targetDistance) / Math.max(targetDistance, 1))
         : 1
       const nearCity = Math.max(0.25, 1 - haversineKm(center, mid) / 18)
-      return { way, value: distance * unpavedBoost * targetFit * nearCity }
+      const nearUser =
+        nearOrigin && haversineKm(center, nearOrigin) < 30
+          ? Math.max(0.35, 1 - haversineKm(nearOrigin, way.geometry[0]) / 16)
+          : 1
+      return { way, value: distance * unpavedBoost * targetFit * nearCity * nearUser }
     })
     .sort((a, b) => b.value - a.value)
     .slice(0, 14)
@@ -602,12 +705,32 @@ function generateRoutes(
   return candidates
     .sort((a, b) => b.score_total - a.score_total)
     .slice(0, 5)
-    .map((route, index) => ({ ...route, name: `${index + 1}. ${route.name}` }))
+    .map((route, index) => ({ ...route, name: `${index + 1}. ${routeDisplayName(route, city, index)}` }))
 }
 
 function wayLabel(way: OsmWay, index: number) {
   if (way.tags.name) return way.tags.name
   return `Path ${index + 1}`
+}
+
+function routeDisplayName(route: TerrainRoute, city: CityResult, index: number) {
+  if (!/^Path \d+$/.test(route.name)) return route.name
+  const routeCenter = centroid(route.geometry)
+  const northSouth = routeCenter[0] >= city.lat ? 'North' : 'South'
+  const eastWest = routeCenter[1] >= city.lon ? 'east' : 'west'
+  const surface =
+    route.facts.unpavedRatio > 0.75
+      ? 'dirt track'
+      : route.facts.unpavedRatio > 0.35
+        ? 'mixed track'
+        : 'easy link'
+  const terrain =
+    route.elevation_gain_m / Math.max(1, route.distance_km) > 28
+      ? 'climb'
+      : route.facts.greenExposure > 0.35
+        ? 'green route'
+        : 'route'
+  return `${northSouth}-${eastWest} ${surface} ${terrain} ${index + 1}`
 }
 
 function buildRouteFromWays(
@@ -821,6 +944,14 @@ function App() {
   const [drawerMode, setDrawerMode] = useState<DrawerMode>('search')
   const [locationState, setLocationState] = useState<LocationState>('idle')
   const [copiedCoords, setCopiedCoords] = useState(false)
+  const [currentLocation, setCurrentLocation] = useState<LatLngTuple | null>(null)
+  const [preferNearMe, setPreferNearMe] = useState(true)
+  const [recentPlaces, setRecentPlaces] = useState<RecentPlace[]>(() =>
+    readJson<RecentPlace[]>(RECENT_PLACES_KEY, []),
+  )
+  const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>(() =>
+    readJson<SavedRoute[]>(SAVED_ROUTES_KEY, []),
+  )
   const mapElement = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const routeLayer = useRef<L.LayerGroup | null>(null)
@@ -837,6 +968,13 @@ function App() {
   const activeStyle = styleConfig(activity, terrainStyle)
   const selectedStart = routeStart(selectedRoute)
   const selectedEnd = routeEnd(selectedRoute)
+  const selectedSaved = selectedRoute
+    ? savedRoutes.some((item) => routeSaveId(item.route) === routeSaveId(selectedRoute))
+    : false
+  const savedRouteIds = useMemo(
+    () => new Set(savedRoutes.map((item) => routeSaveId(item.route))),
+    [savedRoutes],
+  )
 
   useEffect(() => {
     drawerBodyRef.current?.scrollTo({ top: 0 })
@@ -873,6 +1011,40 @@ function App() {
     }
   }, [selectedStart])
 
+  const openSavedRoute = useCallback((saved: SavedRoute) => {
+    setState({ status: 'success', city: saved.city, routes: [saved.route], source: 'cache', cachedAt: saved.savedAt })
+    setSelectedCity(saved.city)
+    setCity(compactPlaceName(saved.city))
+    setActivity(saved.activity)
+    setTerrainStyle(saved.terrainStyle)
+    setSelectedRouteId(saved.route.id)
+    setDrawerMode(isMobile ? null : 'details')
+    focusRouteOnMap(saved.route)
+  }, [focusRouteOnMap, isMobile])
+
+  const toggleSavedRoute = useCallback(() => {
+    if (!selectedRoute || state.status !== 'success') return
+    const savedId = routeSaveId(selectedRoute)
+    setSavedRoutes((current) => {
+      const exists = current.some((item) => routeSaveId(item.route) === savedId)
+      const next = exists
+        ? current.filter((item) => routeSaveId(item.route) !== savedId)
+        : [
+            {
+              id: savedId,
+              savedAt: Date.now(),
+              city: state.city,
+              activity,
+              terrainStyle,
+              route: selectedRoute,
+            },
+            ...current,
+          ].slice(0, 30)
+      writeJson(SAVED_ROUTES_KEY, next)
+      return next
+    })
+  }, [activity, selectedRoute, state, terrainStyle])
+
   useEffect(() => {
     if (!cityFocused || selectedCity || city.trim().length < 2) {
       return
@@ -899,11 +1071,43 @@ function App() {
     setDrawerMode('results')
     setCityFocused(false)
     setCitySuggestionState({ status: 'idle', items: [] })
-    setState({ status: 'loading', message: 'Reading map and terrain data...' })
     setSelectedRouteId(null)
+    const recent = saveRecentPlace(cityResult)
+    setRecentPlaces(recent)
+    const nearOrigin =
+      preferNearMe && currentLocation && haversineKm([cityResult.lat, cityResult.lon], currentLocation) < 30
+        ? currentLocation
+        : null
+    const cacheKey = cacheKeyFor(
+      cityResult,
+      activity,
+      terrainStyle,
+      difficulty,
+      distance,
+      useDistance,
+      nearOrigin,
+    )
+    const cached = readRouteCache(cacheKey)
+
+    if (cached) {
+      setState({
+        status: 'success',
+        city: cached.city,
+        routes: cached.routes,
+        source: 'cache',
+        cachedAt: cached.createdAt,
+      })
+      setSelectedRouteId(cached.routes[0]?.id ?? null)
+      setDrawerMode('results')
+      if (!navigator.onLine) return
+    } else {
+      setState({ status: 'loading', message: 'Reading map and terrain data...' })
+    }
 
     try {
-      setState({ status: 'loading', message: 'Checking paths, surfaces, access, and natural areas...' })
+      if (!cached) {
+        setState({ status: 'loading', message: 'Checking paths, surfaces, access, and natural areas...' })
+      }
       const data = await fetchObjectiveMapData(cityResult).catch(() => ({ ways: [], features: [] }))
       const generatedRoutes = generateRoutes(
         cityResult,
@@ -913,18 +1117,26 @@ function App() {
         difficulty,
         activity,
         terrainStyle,
+        nearOrigin,
       )
-      setState({ status: 'success', city: cityResult, routes: generatedRoutes })
+      writeRouteCache({
+        key: cacheKey,
+        createdAt: Date.now(),
+        city: cityResult,
+        routes: generatedRoutes,
+      })
+      setState({ status: 'success', city: cityResult, routes: generatedRoutes, source: 'live' })
       setSelectedRouteId(generatedRoutes[0]?.id ?? null)
       setDrawerMode('results')
     } catch (error) {
+      if (cached) return
       setState({
         status: 'error',
         message: error instanceof Error ? error.message : 'Terrain analysis failed.',
       })
       setDrawerMode('results')
     }
-  }, [activity, difficulty, distance, terrainStyle, useDistance])
+  }, [activity, currentLocation, difficulty, distance, preferNearMe, terrainStyle, useDistance])
 
   const runSearch = useCallback(async (event?: FormEvent) => {
     event?.preventDefault()
@@ -951,6 +1163,7 @@ function App() {
       const position = await getBrowserPosition()
       const lat = position.coords.latitude
       const lon = position.coords.longitude
+      setCurrentLocation([lat, lon])
       const cityResult = await reverseGeocodeLocation(lat, lon).catch(() => ({
         displayName: `Current location (${lat.toFixed(4)}, ${lon.toFixed(4)})`,
         lat,
@@ -1158,6 +1371,78 @@ function App() {
               )}
             </div>
           )}
+          {currentLocation && (
+            <button
+              className={cn(
+                'flex h-10 items-center justify-between rounded-2xl border border-line bg-white/[0.04] px-3 text-sm font-semibold text-muted transition hover:bg-white/[0.08]',
+                preferNearMe && 'border-accent/35 bg-accent/10 text-accent',
+              )}
+              onClick={() => setPreferNearMe((value) => !value)}
+              type="button"
+            >
+              <span className="inline-flex items-center gap-2">
+                <Sparkles size={15} aria-hidden="true" />
+                Start near me
+              </span>
+              <span>{preferNearMe ? 'On' : 'Off'}</span>
+            </button>
+          )}
+          {(recentPlaces.length > 0 || savedRoutes.length > 0) && (
+            <div className="grid gap-2 pt-1">
+              {recentPlaces.length > 0 && (
+                <div className="grid gap-1.5">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.08em] text-muted">
+                    <History size={14} aria-hidden="true" />
+                    Recent
+                  </div>
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {recentPlaces.map((place) => (
+                      <button
+                        className="shrink-0 rounded-full border border-line bg-white/[0.05] px-3 py-2 text-xs font-semibold text-ink"
+                        key={place.id}
+                        onClick={() => {
+                          setSelectedCity(place)
+                          setCity(compactPlaceName(place))
+                          void searchFromCity(place)
+                        }}
+                        type="button"
+                      >
+                        {place.displayName.split(',')[0]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {savedRoutes.length > 0 && (
+                <div className="grid gap-1.5">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.08em] text-muted">
+                    <BookmarkCheck size={14} aria-hidden="true" />
+                    Saved
+                  </div>
+                  <div className="grid gap-1">
+                    {savedRoutes.slice(0, 3).map((saved) => (
+                      <button
+                        className="flex min-w-0 items-center justify-between gap-3 rounded-2xl border border-line bg-white/[0.04] px-3 py-2.5 text-left"
+                        key={saved.id}
+                        onClick={() => openSavedRoute(saved)}
+                        type="button"
+                      >
+                        <span className="min-w-0">
+                          <strong className="block truncate text-sm font-semibold text-ink">
+                            {saved.route.name.replace(/^\d+\.\s/, '')}
+                          </strong>
+                          <span className="block truncate text-xs font-medium text-muted">
+                            {km(saved.route.distance_km)} / {compactPlaceName(saved.city)}
+                          </span>
+                        </span>
+                        <Navigation className="shrink-0 text-muted" size={16} aria-hidden="true" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <fieldset className="grid gap-2">
@@ -1278,24 +1563,58 @@ function App() {
   const routeList = (
     <div className="grid gap-2">
       {routes.map((route, index) => (
-        <button
+        <div
           className={cn(
-            'grid w-full grid-cols-[4px_1fr_auto] items-center gap-3 rounded-2xl border border-line bg-white/[0.04] p-3 text-left text-ink transition hover:border-accent/45 hover:bg-accent/10',
+            'grid grid-cols-[4px_1fr_auto] items-center gap-3 rounded-2xl border border-line bg-white/[0.04] p-3 text-ink transition hover:border-accent/45 hover:bg-accent/10',
             selectedRoute?.id === route.id && 'border-accent/65 bg-accent/12',
           )}
           key={route.id}
-          onClick={() => selectRoute(route)}
-          type="button"
         >
           <span className="h-11 rounded-full" style={{ background: routeColors[index % routeColors.length] }} />
-          <span className="min-w-0">
+          <button className="min-w-0 text-left" onClick={() => selectRoute(route)} type="button">
             <strong className="block truncate text-sm font-semibold">{route.name.replace(/^\d+\.\s/, '')}</strong>
             <span className="mt-1 block text-xs font-medium capitalize text-muted">
               {route.score_total} score / {km(route.distance_km)} / {route.difficulty}
             </span>
-          </span>
-          <Navigation className="text-muted" size={17} aria-hidden="true" />
-        </button>
+          </button>
+          <button
+            className={cn(
+              'inline-grid h-9 w-9 place-items-center rounded-full border border-line bg-white/[0.05] text-muted transition hover:bg-white/[0.1]',
+              savedRouteIds.has(routeSaveId(route)) && 'border-accent/45 bg-accent/12 text-accent',
+            )}
+            onClick={() => {
+              const savedId = routeSaveId(route)
+              setSavedRoutes((current) => {
+                const exists = current.some((item) => routeSaveId(item.route) === savedId)
+                const next = exists
+                  ? current.filter((item) => routeSaveId(item.route) !== savedId)
+                  : state.status === 'success'
+                    ? [
+                        {
+                          id: savedId,
+                          savedAt: Date.now(),
+                          city: state.city,
+                          activity,
+                          terrainStyle,
+                          route,
+                        },
+                        ...current,
+                      ].slice(0, 30)
+                    : current
+                writeJson(SAVED_ROUTES_KEY, next)
+                return next
+              })
+            }}
+            type="button"
+            aria-label={savedRouteIds.has(routeSaveId(route)) ? 'Remove saved path' : 'Save path'}
+          >
+            {savedRouteIds.has(routeSaveId(route)) ? (
+              <BookmarkCheck size={17} aria-hidden="true" />
+            ) : (
+              <Bookmark size={17} aria-hidden="true" />
+            )}
+          </button>
+        </div>
       ))}
     </div>
   )
@@ -1309,7 +1628,10 @@ function App() {
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-lg font-bold text-ink">Paths</h2>
           {state.status === 'success' && (
-            <p className="truncate text-xs font-medium text-muted">{compactPlaceName(state.city)}</p>
+            <p className="truncate text-xs font-medium text-muted">
+              {compactPlaceName(state.city)}
+              {state.source === 'cache' ? ' / saved earlier' : ''}
+            </p>
           )}
         </div>
       </header>
@@ -1345,7 +1667,15 @@ function App() {
         <Metric icon={Trees} label="Green" value={pct(selectedRoute.facts.greenExposure)} />
       </div>
 
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-4 gap-2">
+        <button
+          className={cn(actionButtonClass, selectedSaved && 'border-accent/45 bg-accent/12 text-accent')}
+          onClick={toggleSavedRoute}
+          type="button"
+        >
+          {selectedSaved ? <BookmarkCheck size={17} aria-hidden="true" /> : <Bookmark size={17} aria-hidden="true" />}
+          {selectedSaved ? 'Saved' : 'Save'}
+        </button>
         <button className={actionButtonClass} onClick={copySelectedCoords} type="button">
           <Copy size={17} aria-hidden="true" />
           {copiedCoords ? 'Copied' : 'GPS'}
@@ -1456,6 +1786,9 @@ function App() {
             </button>
             <button className={iconButtonClass} onClick={() => setDrawerMode('results')} type="button" aria-label="Paths">
               <List size={18} aria-hidden="true" />
+            </button>
+            <button className={cn(iconButtonClass, selectedSaved && 'border-accent/45 bg-accent/12 text-accent')} onClick={toggleSavedRoute} type="button" aria-label={selectedSaved ? 'Remove saved path' : 'Save path'}>
+              {selectedSaved ? <BookmarkCheck size={18} aria-hidden="true" /> : <Bookmark size={18} aria-hidden="true" />}
             </button>
             <a className={iconButtonClass} href={googleMapsUrl(selectedStart)} target="_blank" rel="noreferrer" aria-label="Open start in Google Maps">
               <ExternalLink size={18} aria-hidden="true" />
